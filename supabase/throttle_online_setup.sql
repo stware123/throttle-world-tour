@@ -20,7 +20,9 @@ insert into public.tt_tracks (id, length_m, laps) values
   ('ulster',6000,2),('nw200',7300,2),('iomtt',15200,1)
 on conflict (id) do update set length_m = excluded.length_m, laps = excluded.laps;
 
--- 2) One row per player per track: their best total time and best-lap ghost
+-- 2) One row per rider name per track: their best total time and best-lap ghost.
+--    Riders are identified by name (not case sensitive), so the same name on a
+--    new phone or after a reinstall carries on with the same world times.
 create table if not exists public.tt_times (
   id           bigint generated always as identity primary key,
   track        text not null references public.tt_tracks(id),
@@ -31,9 +33,31 @@ create table if not exists public.tt_times (
   ghost        text,
   ghost_ms     int,
   created_at   timestamptz not null default now(),
-  updated_at   timestamptz not null default now(),
-  unique (track, player_id)
+  updated_at   timestamptz not null default now()
 );
+
+-- 2b) Upgrade from version 1 (one row per device) to one row per name. Safe to rerun.
+alter table public.tt_times add column if not exists name_key text generated always as (lower(trim(name))) stored;
+-- where the same name has several rows, move the fastest lap (and its ghost) onto the row with the best total
+with r as (
+  select id, track, name_key,
+         row_number() over (partition by track, name_key order by total_ms, id)    as by_total,
+         row_number() over (partition by track, name_key order by best_lap_ms, id) as by_lap
+  from public.tt_times),
+pair as (
+  select k.id as keep_id, l.id as lap_id from r k join r l on l.track = k.track and l.name_key = k.name_key
+  where k.by_total = 1 and l.by_lap = 1 and k.id <> l.id)
+update public.tt_times t set
+  best_lap_ms = s.best_lap_ms,
+  ghost    = case when s.ghost is not null then s.ghost    else t.ghost    end,
+  ghost_ms = case when s.ghost is not null then s.ghost_ms else t.ghost_ms end
+from pair, public.tt_times s
+where t.id = pair.keep_id and s.id = pair.lap_id and s.best_lap_ms < t.best_lap_ms;
+-- then drop the extra rows, keeping each name's best
+delete from public.tt_times a using public.tt_times b
+where a.track = b.track and a.name_key = b.name_key and (b.total_ms, b.id) < (a.total_ms, a.id);
+alter table public.tt_times drop constraint if exists tt_times_track_player_id_key;
+create unique index if not exists tt_times_track_name on public.tt_times (track, name_key);
 create index if not exists tt_times_board on public.tt_times (track, total_ms);
 create index if not exists tt_times_lap   on public.tt_times (track, best_lap_ms);
 
@@ -77,8 +101,9 @@ begin
 
   insert into tt_times (track, player_id, name, total_ms, best_lap_ms, ghost, ghost_ms)
   values (p_track, p_player, v_name, p_total_ms, p_best_lap_ms, p_ghost, p_ghost_ms)
-  on conflict (track, player_id) do update set
+  on conflict (track, name_key) do update set
     name        = excluded.name,
+    player_id   = excluded.player_id,
     total_ms    = least(tt_times.total_ms, excluded.total_ms),
     best_lap_ms = least(tt_times.best_lap_ms, excluded.best_lap_ms),
     ghost       = case when excluded.best_lap_ms < tt_times.best_lap_ms and excluded.ghost is not null then excluded.ghost else tt_times.ghost end,
@@ -107,6 +132,16 @@ language sql stable security definer set search_path = public as $$
   select name, ghost, ghost_ms, track from tt_times where id = p_id;
 $$;
 
+-- 7b) A rider's own world best on a track, looked up by name (works on any device)
+create or replace function public.tt_mine(p_track text, p_name text)
+returns table (total_ms int, best_lap_ms int, rank int, has_ghost boolean)
+language sql stable security definer set search_path = public as $$
+  select t.total_ms, t.best_lap_ms,
+         (select 1 + count(*) from tt_times x where x.track = t.track and x.total_ms < t.total_ms)::int,
+         t.ghost is not null
+  from tt_times t where t.track = p_track and t.name_key = lower(trim(p_name)) limit 1;
+$$;
+
 -- 8) Fastest lap holder with a ghost, per track
 create or replace function public.tt_record_ghost(p_track text)
 returns table (id bigint, name text, best_lap_ms int)
@@ -119,6 +154,7 @@ grant execute on function public.tt_submit(text, uuid, text, int, int, text, int
 grant execute on function public.tt_board(text, int)       to anon, authenticated;
 grant execute on function public.tt_ghost(bigint)          to anon, authenticated;
 grant execute on function public.tt_record_ghost(text)     to anon, authenticated;
+grant execute on function public.tt_mine(text, text)       to anon, authenticated;
 
 -- Live races use Supabase Realtime "broadcast" and "presence" channels.
 -- Nothing to create here. Just make sure Realtime is enabled for the project and
