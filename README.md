@@ -8,7 +8,11 @@ A 3D motorbike racing game that runs in the browser — desktop, phone or tablet
 - **World Tour** — 13 rounds across 10 countries: superbike circuits and road courses, desert and forest scramblers, and motocross (including a night-time arenacross).
 - **Real Circuits** — 15 rounds: Snetterton, Thruxton, Silverstone, Donington Park, Brands Hatch, Oulton Park, Knockhill, Assen, Mugello, Phillip Island, Laguna Seca, Cadwell Park, Ulster GP (Dundrod), North West 200 and the TT Mountain Course, with corner names on screen.
 - **Time Trial** — every track, best-lap ghost, live split and a top-10 leaderboard per track (saved in your browser).
+- **Online** — world leaderboards for every track, race any player's best-lap ghost, and live races for up to 8 riders using a 4-letter race code (empty spots can be filled with computer riders).
 - Keyboard, Xbox/PlayStation controller, or touch controls.
+
+## Online setup (for the repo owner)
+Online features use Supabase. Run `supabase/throttle_online_setup.sql` once in the project's SQL Editor. The game reads the project URL and the public *anon* key at build time; the anon key is safe to publish. All writes go through database functions that validate lap times and rate-limit submissions.
 
 ## Controls
 | | Keyboard | Controller | Touch |
