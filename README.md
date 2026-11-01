@@ -24,6 +24,7 @@ Online features use Supabase. Run `supabase/throttle_online_setup.sql` once in t
 
 ## Credits and data
 - Built with [three.js](https://threejs.org) (MIT).
+- Isle of Man TT Mountain Course (full 37.73 miles): OpenStreetMap relation 188240, (c) OpenStreetMap contributors, [ODbL](https://opendatacommons.org/licenses/odbl/).
 - Silverstone and Brands Hatch outlines: [TUMFTM racetrack-database](https://github.com/TUMFTM/racetrack-database) (derived from OpenStreetMap data), LGPL-3.0.
 - Mugello outline: [bacinger/f1-circuits](https://github.com/bacinger/f1-circuits), MIT.
 - Other real circuits are hand-traced approximations from their corner sequences; the TT, North West 200 and Ulster GP courses are scaled down. This is an unofficial fan game and is not affiliated with any circuit, series or event organiser.

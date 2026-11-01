@@ -17,7 +17,7 @@ insert into public.tt_tracks (id, length_m, laps) values
   ('alpine',3451,2),('arena',1142,4),('tokyo',3191,3),('snetterton',4778,2),('thruxton',3790,3),
   ('silverstone',5891,2),('donington',4020,3),('brands',3908,3),('oulton',4307,3),('knockhill',2050,4),
   ('assen',4542,2),('mugello',5245,2),('phillip',4448,3),('laguna',3602,3),('cadwell',3480,3),
-  ('ulster',6000,2),('nw200',7300,2),('iomtt',15200,1)
+  ('ulster',6000,2),('nw200',14436,2),('iomtt',60720,1)
 on conflict (id) do update set length_m = excluded.length_m, laps = excluded.laps;
 
 -- 2) One row per rider name per track: their best total time and best-lap ghost.
@@ -60,6 +60,11 @@ alter table public.tt_times drop constraint if exists tt_times_track_player_id_k
 create unique index if not exists tt_times_track_name on public.tt_times (track, name_key);
 create index if not exists tt_times_board on public.tt_times (track, total_ms);
 create index if not exists tt_times_lap   on public.tt_times (track, best_lap_ms);
+
+-- 1b) Times set on an older, shorter version of a course can't stand on the full-length one:
+--      anything faster than a lap at 82 m/s average on the current length is cleared. Safe to rerun.
+delete from public.tt_times t using public.tt_tracks k
+where t.track = k.id and t.best_lap_ms < (k.length_m / 82.0 * 1000)::int;
 
 -- 3) Submission log for simple rate limiting
 create table if not exists public.tt_submissions (
