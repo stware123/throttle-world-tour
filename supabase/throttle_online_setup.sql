@@ -58,6 +58,8 @@ delete from public.tt_times a using public.tt_times b
 where a.track = b.track and a.name_key = b.name_key and (b.total_ms, b.id) < (a.total_ms, a.id);
 alter table public.tt_times drop constraint if exists tt_times_track_player_id_key;
 create unique index if not exists tt_times_track_name on public.tt_times (track, name_key);
+-- 2c) Which bike (class and upgrades) set each time, shown on the boards
+alter table public.tt_times add column if not exists bike text;
 create index if not exists tt_times_board on public.tt_times (track, total_ms);
 create index if not exists tt_times_lap   on public.tt_times (track, best_lap_ms);
 
@@ -81,9 +83,10 @@ drop policy if exists "tracks readable" on public.tt_tracks;
 create policy "tracks readable" on public.tt_tracks for select using (true);
 
 -- 5) Submit a time trial result (validates it, keeps each player's best)
+drop function if exists public.tt_submit(text, uuid, text, int, int, text, int);
 create or replace function public.tt_submit(
   p_track text, p_player uuid, p_name text,
-  p_total_ms int, p_best_lap_ms int, p_ghost text, p_ghost_ms int
+  p_total_ms int, p_best_lap_ms int, p_ghost text, p_ghost_ms int, p_bike text default null
 ) returns json
 language plpgsql security definer set search_path = public as $$
 declare
@@ -104,12 +107,13 @@ begin
   v_name := left(regexp_replace(trim(coalesce(p_name, '')), '[^[:print:]]', '', 'g'), 16);
   if v_name = '' then v_name := 'Rider'; end if;
 
-  insert into tt_times (track, player_id, name, total_ms, best_lap_ms, ghost, ghost_ms)
-  values (p_track, p_player, v_name, p_total_ms, p_best_lap_ms, p_ghost, p_ghost_ms)
+  insert into tt_times (track, player_id, name, total_ms, best_lap_ms, ghost, ghost_ms, bike)
+  values (p_track, p_player, v_name, p_total_ms, p_best_lap_ms, p_ghost, p_ghost_ms, left(p_bike, 40))
   on conflict (track, name_key) do update set
     name        = excluded.name,
     player_id   = excluded.player_id,
     total_ms    = least(tt_times.total_ms, excluded.total_ms),
+    bike        = case when excluded.total_ms < tt_times.total_ms then excluded.bike else tt_times.bike end,
     best_lap_ms = least(tt_times.best_lap_ms, excluded.best_lap_ms),
     ghost       = case when excluded.best_lap_ms < tt_times.best_lap_ms and excluded.ghost is not null then excluded.ghost else tt_times.ghost end,
     ghost_ms    = case when excluded.best_lap_ms < tt_times.best_lap_ms and excluded.ghost is not null then excluded.ghost_ms else tt_times.ghost_ms end,
@@ -122,10 +126,11 @@ begin
 end $$;
 
 -- 6) Read a track's leaderboard (no ghost data, so it stays small)
+drop function if exists public.tt_board(text, int);
 create or replace function public.tt_board(p_track text, p_limit int default 20)
-returns table (id bigint, name text, total_ms int, best_lap_ms int, has_ghost boolean, updated_at timestamptz, player_id uuid)
+returns table (id bigint, name text, total_ms int, best_lap_ms int, has_ghost boolean, updated_at timestamptz, player_id uuid, bike text)
 language sql stable security definer set search_path = public as $$
-  select id, name, total_ms, best_lap_ms, ghost is not null, updated_at, player_id
+  select id, name, total_ms, best_lap_ms, ghost is not null, updated_at, player_id, bike
   from tt_times where track = p_track
   order by total_ms asc limit least(greatest(p_limit, 1), 50);
 $$;
@@ -154,8 +159,8 @@ language sql stable security definer set search_path = public as $$
   select id, name, best_lap_ms from tt_times where track = p_track and ghost is not null order by best_lap_ms asc limit 1;
 $$;
 
-revoke all on function public.tt_submit(text, uuid, text, int, int, text, int) from public;
-grant execute on function public.tt_submit(text, uuid, text, int, int, text, int) to anon, authenticated;
+revoke all on function public.tt_submit(text, uuid, text, int, int, text, int, text) from public;
+grant execute on function public.tt_submit(text, uuid, text, int, int, text, int, text) to anon, authenticated;
 grant execute on function public.tt_board(text, int)       to anon, authenticated;
 grant execute on function public.tt_ghost(bigint)          to anon, authenticated;
 grant execute on function public.tt_record_ghost(text)     to anon, authenticated;
