@@ -17,7 +17,7 @@ insert into public.tt_tracks (id, length_m, laps) values
   ('alpine',3451,2),('arena',1142,4),('tokyo',3191,3),('snetterton',4778,2),('thruxton',3790,3),
   ('silverstone',5891,2),('donington',4020,3),('brands',3908,3),('oulton',4307,3),('knockhill',2050,4),
   ('assen',4542,2),('mugello',5245,2),('phillip',4448,3),('laguna',3602,3),('cadwell',3480,3),
-  ('ulster',6000,2),('nw200',14436,2),('iomtt',60720,1)
+  ('ulster',6000,2),('nw200',14436,2),('iomtt',60720,1),('losail',5380,3)
 on conflict (id) do update set length_m = excluded.length_m, laps = excluded.laps;
 
 -- 2) One row per rider name per track: their best total time and best-lap ghost.
