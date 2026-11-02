@@ -59,7 +59,8 @@ where a.track = b.track and a.name_key = b.name_key and (b.total_ms, b.id) < (a.
 alter table public.tt_times drop constraint if exists tt_times_track_player_id_key;
 create unique index if not exists tt_times_track_name on public.tt_times (track, name_key);
 -- 2c) Which bike (class and upgrades) set each time, shown on the boards
-alter table public.tt_times add column if not exists bike text;
+alter table public.tt_times add column if not exists bike text;       -- bike that set the best total time
+alter table public.tt_times add column if not exists lap_bike text;   -- bike that set the best lap
 create index if not exists tt_times_board on public.tt_times (track, total_ms);
 create index if not exists tt_times_lap   on public.tt_times (track, best_lap_ms);
 
@@ -107,13 +108,14 @@ begin
   v_name := left(regexp_replace(trim(coalesce(p_name, '')), '[^[:print:]]', '', 'g'), 16);
   if v_name = '' then v_name := 'Rider'; end if;
 
-  insert into tt_times (track, player_id, name, total_ms, best_lap_ms, ghost, ghost_ms, bike)
-  values (p_track, p_player, v_name, p_total_ms, p_best_lap_ms, p_ghost, p_ghost_ms, left(p_bike, 40))
+  insert into tt_times (track, player_id, name, total_ms, best_lap_ms, ghost, ghost_ms, bike, lap_bike)
+  values (p_track, p_player, v_name, p_total_ms, p_best_lap_ms, p_ghost, p_ghost_ms, left(p_bike, 40), left(p_bike, 40))
   on conflict (track, name_key) do update set
     name        = excluded.name,
     player_id   = excluded.player_id,
     total_ms    = least(tt_times.total_ms, excluded.total_ms),
     bike        = case when excluded.total_ms < tt_times.total_ms then excluded.bike else tt_times.bike end,
+    lap_bike    = case when excluded.best_lap_ms < tt_times.best_lap_ms then excluded.lap_bike else coalesce(tt_times.lap_bike, tt_times.bike) end,
     best_lap_ms = least(tt_times.best_lap_ms, excluded.best_lap_ms),
     ghost       = case when excluded.best_lap_ms < tt_times.best_lap_ms and excluded.ghost is not null then excluded.ghost else tt_times.ghost end,
     ghost_ms    = case when excluded.best_lap_ms < tt_times.best_lap_ms and excluded.ghost is not null then excluded.ghost_ms else tt_times.ghost_ms end,
@@ -128,9 +130,9 @@ end $$;
 -- 6) Read a track's leaderboard (no ghost data, so it stays small)
 drop function if exists public.tt_board(text, int);
 create or replace function public.tt_board(p_track text, p_limit int default 20)
-returns table (id bigint, name text, total_ms int, best_lap_ms int, has_ghost boolean, updated_at timestamptz, player_id uuid, bike text)
+returns table (id bigint, name text, total_ms int, best_lap_ms int, has_ghost boolean, updated_at timestamptz, player_id uuid, bike text, lap_bike text)
 language sql stable security definer set search_path = public as $$
-  select id, name, total_ms, best_lap_ms, ghost is not null, updated_at, player_id, bike
+  select id, name, total_ms, best_lap_ms, ghost is not null, updated_at, player_id, bike, coalesce(lap_bike, bike)
   from tt_times where track = p_track
   order by total_ms asc limit least(greatest(p_limit, 1), 50);
 $$;
@@ -153,10 +155,11 @@ language sql stable security definer set search_path = public as $$
 $$;
 
 -- 8) Fastest lap holder with a ghost, per track
+drop function if exists public.tt_record_ghost(text);
 create or replace function public.tt_record_ghost(p_track text)
-returns table (id bigint, name text, best_lap_ms int)
+returns table (id bigint, name text, best_lap_ms int, bike text)
 language sql stable security definer set search_path = public as $$
-  select id, name, best_lap_ms from tt_times where track = p_track and ghost is not null order by best_lap_ms asc limit 1;
+  select id, name, best_lap_ms, coalesce(lap_bike, bike) from tt_times where track = p_track and ghost is not null order by best_lap_ms asc limit 1;
 $$;
 
 revoke all on function public.tt_submit(text, uuid, text, int, int, text, int, text) from public;
