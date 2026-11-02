@@ -38,14 +38,15 @@ create table if not exists public.tt_times (
 
 -- 2b) Upgrade from version 1 (one row per device) to one row per name. Safe to rerun.
 alter table public.tt_times add column if not exists name_key text generated always as (lower(trim(name))) stored;
+alter table public.tt_times add column if not exists cond text not null default 'dry';   -- dry / wet / snow boards
 -- where the same name has several rows, move the fastest lap (and its ghost) onto the row with the best total
 with r as (
-  select id, track, name_key,
-         row_number() over (partition by track, name_key order by total_ms, id)    as by_total,
-         row_number() over (partition by track, name_key order by best_lap_ms, id) as by_lap
+  select id, track, name_key, cond,
+         row_number() over (partition by track, name_key, cond order by total_ms, id)    as by_total,
+         row_number() over (partition by track, name_key, cond order by best_lap_ms, id) as by_lap
   from public.tt_times),
 pair as (
-  select k.id as keep_id, l.id as lap_id from r k join r l on l.track = k.track and l.name_key = k.name_key
+  select k.id as keep_id, l.id as lap_id from r k join r l on l.track = k.track and l.name_key = k.name_key and l.cond = k.cond
   where k.by_total = 1 and l.by_lap = 1 and k.id <> l.id)
 update public.tt_times t set
   best_lap_ms = s.best_lap_ms,
@@ -55,12 +56,14 @@ from pair, public.tt_times s
 where t.id = pair.keep_id and s.id = pair.lap_id and s.best_lap_ms < t.best_lap_ms;
 -- then drop the extra rows, keeping each name's best
 delete from public.tt_times a using public.tt_times b
-where a.track = b.track and a.name_key = b.name_key and (b.total_ms, b.id) < (a.total_ms, a.id);
+where a.track = b.track and a.name_key = b.name_key and a.cond = b.cond and (b.total_ms, b.id) < (a.total_ms, a.id);
 alter table public.tt_times drop constraint if exists tt_times_track_player_id_key;
-create unique index if not exists tt_times_track_name on public.tt_times (track, name_key);
+drop index if exists public.tt_times_track_name;
+create unique index if not exists tt_times_track_name_cond on public.tt_times (track, name_key, cond);
 -- 2c) Which bike (class and upgrades) set each time, shown on the boards
 alter table public.tt_times add column if not exists bike text;       -- bike that set the best total time
 alter table public.tt_times add column if not exists lap_bike text;   -- bike that set the best lap
+
 create index if not exists tt_times_board on public.tt_times (track, total_ms);
 create index if not exists tt_times_lap   on public.tt_times (track, best_lap_ms);
 
@@ -85,9 +88,10 @@ create policy "tracks readable" on public.tt_tracks for select using (true);
 
 -- 5) Submit a time trial result (validates it, keeps each player's best)
 drop function if exists public.tt_submit(text, uuid, text, int, int, text, int);
+drop function if exists public.tt_submit(text, uuid, text, int, int, text, int, text);
 create or replace function public.tt_submit(
   p_track text, p_player uuid, p_name text,
-  p_total_ms int, p_best_lap_ms int, p_ghost text, p_ghost_ms int, p_bike text default null
+  p_total_ms int, p_best_lap_ms int, p_ghost text, p_ghost_ms int, p_bike text default null, p_cond text default 'dry'
 ) returns json
 language plpgsql security definer set search_path = public as $$
 declare
@@ -107,10 +111,11 @@ begin
 
   v_name := left(regexp_replace(trim(coalesce(p_name, '')), '[^[:print:]]', '', 'g'), 16);
   if v_name = '' then v_name := 'Rider'; end if;
+  if p_cond is null or p_cond not in ('dry', 'wet', 'snow') then p_cond := 'dry'; end if;
 
-  insert into tt_times (track, player_id, name, total_ms, best_lap_ms, ghost, ghost_ms, bike, lap_bike)
-  values (p_track, p_player, v_name, p_total_ms, p_best_lap_ms, p_ghost, p_ghost_ms, left(p_bike, 40), left(p_bike, 40))
-  on conflict (track, name_key) do update set
+  insert into tt_times (track, player_id, name, total_ms, best_lap_ms, ghost, ghost_ms, bike, lap_bike, cond)
+  values (p_track, p_player, v_name, p_total_ms, p_best_lap_ms, p_ghost, p_ghost_ms, left(p_bike, 40), left(p_bike, 40), p_cond)
+  on conflict (track, name_key, cond) do update set
     name        = excluded.name,
     player_id   = excluded.player_id,
     total_ms    = least(tt_times.total_ms, excluded.total_ms),
@@ -122,18 +127,19 @@ begin
     updated_at  = now()
   returning * into v_row;
 
-  select 1 + count(*) into v_rank from tt_times where track = p_track and total_ms < v_row.total_ms;
-  select 1 + count(*) into v_lap_rank from tt_times where track = p_track and best_lap_ms < v_row.best_lap_ms;
+  select 1 + count(*) into v_rank from tt_times where track = p_track and cond = p_cond and total_ms < v_row.total_ms;
+  select 1 + count(*) into v_lap_rank from tt_times where track = p_track and cond = p_cond and best_lap_ms < v_row.best_lap_ms;
   return json_build_object('rank', v_rank, 'lap_rank', v_lap_rank, 'total_ms', v_row.total_ms, 'best_lap_ms', v_row.best_lap_ms);
 end $$;
 
 -- 6) Read a track's leaderboard (no ghost data, so it stays small)
 drop function if exists public.tt_board(text, int);
-create or replace function public.tt_board(p_track text, p_limit int default 20)
+drop function if exists public.tt_board(text, int, text);
+create or replace function public.tt_board(p_track text, p_limit int default 20, p_cond text default 'dry')
 returns table (id bigint, name text, total_ms int, best_lap_ms int, has_ghost boolean, updated_at timestamptz, player_id uuid, bike text, lap_bike text)
 language sql stable security definer set search_path = public as $$
   select id, name, total_ms, best_lap_ms, ghost is not null, updated_at, player_id, bike, coalesce(lap_bike, bike)
-  from tt_times where track = p_track
+  from tt_times where track = p_track and cond = coalesce(p_cond, 'dry')
   order by total_ms asc limit least(greatest(p_limit, 1), 50);
 $$;
 
@@ -145,29 +151,31 @@ language sql stable security definer set search_path = public as $$
 $$;
 
 -- 7b) A rider's own world best on a track, looked up by name (works on any device)
-create or replace function public.tt_mine(p_track text, p_name text)
+drop function if exists public.tt_mine(text, text);
+create or replace function public.tt_mine(p_track text, p_name text, p_cond text default 'dry')
 returns table (total_ms int, best_lap_ms int, rank int, has_ghost boolean)
 language sql stable security definer set search_path = public as $$
   select t.total_ms, t.best_lap_ms,
-         (select 1 + count(*) from tt_times x where x.track = t.track and x.total_ms < t.total_ms)::int,
+         (select 1 + count(*) from tt_times x where x.track = t.track and x.cond = t.cond and x.total_ms < t.total_ms)::int,
          t.ghost is not null
-  from tt_times t where t.track = p_track and t.name_key = lower(trim(p_name)) limit 1;
+  from tt_times t where t.track = p_track and t.cond = coalesce(p_cond, 'dry') and t.name_key = lower(trim(p_name)) limit 1;
 $$;
 
 -- 8) Fastest lap holder with a ghost, per track
 drop function if exists public.tt_record_ghost(text);
-create or replace function public.tt_record_ghost(p_track text)
+drop function if exists public.tt_record_ghost(text, text);
+create or replace function public.tt_record_ghost(p_track text, p_cond text default 'dry')
 returns table (id bigint, name text, best_lap_ms int, bike text)
 language sql stable security definer set search_path = public as $$
-  select id, name, best_lap_ms, coalesce(lap_bike, bike) from tt_times where track = p_track and ghost is not null order by best_lap_ms asc limit 1;
+  select id, name, best_lap_ms, coalesce(lap_bike, bike) from tt_times where track = p_track and cond = coalesce(p_cond, 'dry') and ghost is not null order by best_lap_ms asc limit 1;
 $$;
 
-revoke all on function public.tt_submit(text, uuid, text, int, int, text, int, text) from public;
-grant execute on function public.tt_submit(text, uuid, text, int, int, text, int, text) to anon, authenticated;
-grant execute on function public.tt_board(text, int)       to anon, authenticated;
+revoke all on function public.tt_submit(text, uuid, text, int, int, text, int, text, text) from public;
+grant execute on function public.tt_submit(text, uuid, text, int, int, text, int, text, text) to anon, authenticated;
+grant execute on function public.tt_board(text, int, text) to anon, authenticated;
 grant execute on function public.tt_ghost(bigint)          to anon, authenticated;
-grant execute on function public.tt_record_ghost(text)     to anon, authenticated;
-grant execute on function public.tt_mine(text, text)       to anon, authenticated;
+grant execute on function public.tt_record_ghost(text, text) to anon, authenticated;
+grant execute on function public.tt_mine(text, text, text) to anon, authenticated;
 
 -- Live races use Supabase Realtime "broadcast" and "presence" channels.
 -- Nothing to create here. Just make sure Realtime is enabled for the project and
