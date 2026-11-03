@@ -9,6 +9,8 @@ A 3D motorbike racing game that runs in the browser — desktop, phone or tablet
 - **Real Circuits** — 15 rounds: Snetterton, Thruxton, Silverstone, Donington Park, Brands Hatch, Oulton Park, Knockhill, Assen, Mugello, Phillip Island, Laguna Seca, Cadwell Park, Ulster GP (Dundrod), North West 200 and the TT Mountain Course, with corner names on screen.
 - **Time Trial** — every track, best-lap ghost, live split and a top-10 leaderboard per track (saved in your browser).
 - **Online** — world leaderboards for every track, race any player's best-lap ghost, and live races for up to 8 riders using a 4-letter race code (empty spots can be filled with computer riders).
+- **Helmet cam** — ride from inside the helmet: visor and chin bar, the screen and a live dash, head that looks through the corners and tucks in on the straights.
+- **TV-style replays** — watch your best lap, a world record or anyone's saved lap, with a director cutting between trackside long-lens cameras, drones, a helicopter, tracking, tail, front and tank cams, a fly-by and the helmet cam, ending in slow motion at the line.
 - Keyboard, Xbox/PlayStation controller, or touch controls.
 
 ## Online setup (for the repo owner)
