@@ -112,7 +112,8 @@ begin
 
   v_name := left(regexp_replace(trim(coalesce(p_name, '')), '[^[:print:]]', '', 'g'), 16);
   if v_name = '' then v_name := 'Rider'; end if;
-  if p_cond is null or p_cond not in ('dry', 'wet', 'snow') then p_cond := 'dry'; end if;
+  -- dry / wet / snow boards, plus one board per day for the daily challenge (daily-YYYYMMDD)
+  if p_cond is null or not (p_cond in ('dry', 'wet', 'snow') or p_cond ~ '^daily-[0-9]{8}$') then p_cond := 'dry'; end if;
 
   insert into tt_times (track, player_id, name, total_ms, best_lap_ms, ghost, ghost_ms, bike, lap_bike, cond)
   values (p_track, p_player, v_name, p_total_ms, p_best_lap_ms, p_ghost, p_ghost_ms, left(p_bike, 40), left(p_bike, 40), p_cond)
@@ -181,3 +182,11 @@ grant execute on function public.tt_mine(text, text, text) to anon, authenticate
 -- Live races use Supabase Realtime "broadcast" and "presence" channels.
 -- Nothing to create here. Just make sure Realtime is enabled for the project and
 -- that Realtime Settings does NOT have "Private channels only" switched on.
+
+-- 9) What this database supports (the game checks before posting daily challenge times)
+create or replace function public.tt_caps() returns json
+language sql stable security definer set search_path = public as $$
+  select json_build_object('daily', true, 'version', 3);
+$$;
+grant execute on function public.tt_caps() to anon, authenticated;
+
