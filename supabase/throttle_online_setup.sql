@@ -190,3 +190,47 @@ language sql stable security definer set search_path = public as $$
 $$;
 grant execute on function public.tt_caps() to anon, authenticated;
 
+
+-- 10) Save a single lap the moment it is a record (so a world lap record counts even if the run
+--     is not finished). Only the best lap and its ghost change; a rider with no full run yet gets
+--     a placeholder total (one hour) that the game shows as "no finished run".
+create or replace function public.tt_submit_lap(
+  p_track text, p_player uuid, p_name text, p_best_lap_ms int, p_ghost text, p_ghost_ms int, p_bike text default null, p_cond text default 'dry'
+) returns json
+language plpgsql security definer set search_path = public as $$
+declare
+  t record; v_name text; v_row public.tt_times; v_lap_rank int;
+begin
+  select * into t from tt_tracks where id = p_track;
+  if not found then raise exception 'unknown track'; end if;
+  if p_best_lap_ms < (t.length_m / 82.0 * 1000)::int then raise exception 'lap time not possible'; end if;
+  if p_ghost is not null and (char_length(p_ghost) > 400000 or p_ghost_ms is null or abs(p_ghost_ms - p_best_lap_ms) > 1500) then p_ghost := null; p_ghost_ms := null; end if;
+  if (select count(*) from tt_submissions where player_id = p_player and at > now() - interval '10 minutes') >= 30 then
+    raise exception 'too many submissions, try again in a few minutes';
+  end if;
+  insert into tt_submissions (player_id) values (p_player);
+  v_name := left(regexp_replace(trim(coalesce(p_name, '')), '[^[:print:]]', '', 'g'), 16);
+  if v_name = '' then v_name := 'Rider'; end if;
+  if p_cond is null or p_cond not in ('dry', 'wet', 'snow') then p_cond := 'dry'; end if;
+
+  insert into tt_times (track, player_id, name, total_ms, best_lap_ms, ghost, ghost_ms, bike, lap_bike, cond)
+  values (p_track, p_player, v_name, 3600000, p_best_lap_ms, p_ghost, p_ghost_ms, left(p_bike, 40), left(p_bike, 40), p_cond)
+  on conflict (track, name_key, cond) do update set
+    name        = excluded.name,
+    player_id   = excluded.player_id,
+    lap_bike    = case when excluded.best_lap_ms < tt_times.best_lap_ms then excluded.lap_bike else coalesce(tt_times.lap_bike, tt_times.bike) end,
+    best_lap_ms = least(tt_times.best_lap_ms, excluded.best_lap_ms),
+    ghost       = case when excluded.best_lap_ms < tt_times.best_lap_ms and excluded.ghost is not null then excluded.ghost else tt_times.ghost end,
+    ghost_ms    = case when excluded.best_lap_ms < tt_times.best_lap_ms and excluded.ghost is not null then excluded.ghost_ms else tt_times.ghost_ms end,
+    updated_at  = case when excluded.best_lap_ms < tt_times.best_lap_ms then now() else tt_times.updated_at end
+  returning * into v_row;
+
+  select 1 + count(*) into v_lap_rank from tt_times where track = p_track and cond = p_cond and best_lap_ms < v_row.best_lap_ms;
+  return json_build_object('lap_rank', v_lap_rank, 'best_lap_ms', v_row.best_lap_ms);
+end $$;
+revoke all on function public.tt_submit_lap(text, uuid, text, int, text, int, text, text) from public;
+grant execute on function public.tt_submit_lap(text, uuid, text, int, text, int, text, text) to anon, authenticated;
+create or replace function public.tt_caps() returns json
+language sql stable security definer set search_path = public as $$
+  select json_build_object('daily', true, 'lap', true, 'version', 4);
+$$;
