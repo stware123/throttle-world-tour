@@ -87,6 +87,49 @@ alter table public.tt_submissions enable row level security;
 drop policy if exists "tracks readable" on public.tt_tracks;
 create policy "tracks readable" on public.tt_tracks for select using (true);
 
+
+-- 4b) Rider names: each name belongs to the rider (device) who first used it, so no one else can take it
+create table if not exists public.player_names (
+  name_key   text primary key,
+  name       text not null,
+  player_id  uuid not null,
+  created_at timestamptz not null default now()
+);
+alter table public.player_names enable row level security;
+-- names already on the boards belong to whoever last posted under them
+insert into public.player_names (name_key, name, player_id)
+select distinct on (name_key) name_key, name, player_id from public.tt_times where player_id is not null
+order by name_key, updated_at desc
+on conflict (name_key) do nothing;
+
+create or replace function public.tt_name_ok(p_name text, p_player uuid) returns void
+language plpgsql security definer set search_path = public as $$
+declare k text := lower(trim(p_name)); owner uuid;
+begin
+  select player_id into owner from player_names where name_key = k;
+  if owner is null then
+    insert into player_names (name_key, name, player_id) values (k, trim(p_name), p_player) on conflict (name_key) do nothing;
+    select player_id into owner from player_names where name_key = k;
+  end if;
+  if owner <> p_player then raise exception 'name taken'; end if;
+end $$;
+revoke all on function public.tt_name_ok(text, uuid) from public;
+
+-- Claim a name when a rider picks it: {"ok": true} or {"ok": false, "taken": true}
+create or replace function public.tt_claim_name(p_name text, p_player uuid) returns json
+language plpgsql security definer set search_path = public as $$
+declare v text := left(regexp_replace(trim(coalesce(p_name, '')), '[^[:print:]]', '', 'g'), 16);
+begin
+  if v = '' then return json_build_object('ok', false, 'empty', true); end if;
+  perform public.tt_name_ok(v, p_player);
+  return json_build_object('ok', true);
+exception when others then
+  if sqlerrm = 'name taken' then return json_build_object('ok', false, 'taken', true); end if;
+  raise;
+end $$;
+revoke all on function public.tt_claim_name(text, uuid) from public;
+grant execute on function public.tt_claim_name(text, uuid) to anon, authenticated;
+
 -- 5) Submit a time trial result (validates it, keeps each player's best)
 drop function if exists public.tt_submit(text, uuid, text, int, int, text, int);
 drop function if exists public.tt_submit(text, uuid, text, int, int, text, int, text);
@@ -112,6 +155,7 @@ begin
 
   v_name := left(regexp_replace(trim(coalesce(p_name, '')), '[^[:print:]]', '', 'g'), 16);
   if v_name = '' then v_name := 'Rider'; end if;
+  perform public.tt_name_ok(v_name, p_player);   -- a name belongs to the first rider who used it
   -- dry / wet / snow boards, plus one board per day for the daily challenge (daily-YYYYMMDD)
   if p_cond is null or not (p_cond in ('dry', 'wet', 'snow') or p_cond ~ '^daily-[0-9]{8}$') then p_cond := 'dry'; end if;
 
@@ -211,6 +255,7 @@ begin
   insert into tt_submissions (player_id) values (p_player);
   v_name := left(regexp_replace(trim(coalesce(p_name, '')), '[^[:print:]]', '', 'g'), 16);
   if v_name = '' then v_name := 'Rider'; end if;
+  perform public.tt_name_ok(v_name, p_player);
   if p_cond is null or p_cond not in ('dry', 'wet', 'snow') then p_cond := 'dry'; end if;
 
   insert into tt_times (track, player_id, name, total_ms, best_lap_ms, ghost, ghost_ms, bike, lap_bike, cond)
@@ -232,5 +277,5 @@ revoke all on function public.tt_submit_lap(text, uuid, text, int, text, int, te
 grant execute on function public.tt_submit_lap(text, uuid, text, int, text, int, text, text) to anon, authenticated;
 create or replace function public.tt_caps() returns json
 language sql stable security definer set search_path = public as $$
-  select json_build_object('daily', true, 'lap', true, 'version', 4);
+  select json_build_object('daily', true, 'lap', true, 'names', true, 'version', 5);
 $$;
