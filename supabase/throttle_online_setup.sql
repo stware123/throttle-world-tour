@@ -115,14 +115,66 @@ begin
 end $$;
 revoke all on function public.tt_name_ok(text, uuid) from public;
 
--- Claim a name when a rider picks it: {"ok": true} or {"ok": false, "taken": true}
+-- Name codes: each name gets a private code (only a fingerprint of it is stored). Typing the code on
+-- another phone moves the name, and the times under it, to that phone.
+alter table public.player_names add column if not exists code_hash text;
+alter table public.player_names add column if not exists fails int not null default 0;
+alter table public.player_names add column if not exists fail_at timestamptz;
+
+create or replace function public.tt_code_hash(k text, c text) returns text
+language sql immutable as $$ select encode(sha256(convert_to(k || ':' || upper(replace(trim(c), '-', '')), 'UTF8')), 'hex') $$;
+
+-- a fresh code, e.g. 7F3KQ-9C2XD (no 0/O or 1/I to mix up)
+create or replace function public.tt_make_code() returns text
+language plpgsql volatile as $$
+declare a text := 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; h bytea := decode(replace(gen_random_uuid()::text, '-', ''), 'hex'); r text := ''; i int;
+begin
+  for i in 0..9 loop r := r || substr(a, (get_byte(h, i) % 32) + 1, 1); end loop;
+  return substr(r, 1, 5) || '-' || substr(r, 6, 5);
+end $$;
+
+-- the owner gets a code: only when the name has none yet (p_new = false), or a replacement (p_new = true)
+create or replace function public.tt_name_code(p_name text, p_player uuid, p_new boolean default false) returns json
+language plpgsql security definer set search_path = public as $$
+declare k text := lower(trim(p_name)); n record; c text;
+begin
+  select * into n from player_names where name_key = k;
+  if not found or n.player_id <> p_player then return json_build_object('ok', false, 'owner', false); end if;
+  if n.code_hash is not null and not p_new then return json_build_object('ok', true, 'has', true); end if;
+  c := tt_make_code();
+  update player_names set code_hash = tt_code_hash(k, c) where name_key = k;
+  return json_build_object('ok', true, 'code', c);
+end $$;
+revoke all on function public.tt_name_code(text, uuid, boolean) from public;
+grant execute on function public.tt_name_code(text, uuid, boolean) to anon, authenticated;
+
+-- move a name to this phone with its code; ten wrong codes lock the name for an hour
+create or replace function public.tt_recover_name(p_name text, p_code text, p_player uuid) returns json
+language plpgsql security definer set search_path = public as $$
+declare k text := lower(trim(p_name)); n record;
+begin
+  select * into n from player_names where name_key = k;
+  if not found then return json_build_object('ok', false, 'unknown', true); end if;
+  if n.fails >= 10 and n.fail_at > now() - interval '1 hour' then return json_build_object('ok', false, 'locked', true); end if;
+  if n.code_hash is null or n.code_hash <> tt_code_hash(k, coalesce(p_code, '')) then
+    update player_names set fails = case when fail_at > now() - interval '1 hour' then fails + 1 else 1 end, fail_at = now() where name_key = k;
+    return json_build_object('ok', false, 'wrong', true);
+  end if;
+  update player_names set player_id = p_player, fails = 0, fail_at = null where name_key = k;
+  update tt_times set player_id = p_player where name_key = k;
+  return json_build_object('ok', true, 'name', n.name);
+end $$;
+revoke all on function public.tt_recover_name(text, text, uuid) from public;
+grant execute on function public.tt_recover_name(text, text, uuid) to anon, authenticated;
+
+-- Claim a name when a rider picks it: {"ok": true, "code": "…"} for a new name, or {"ok": false, "taken": true}
 create or replace function public.tt_claim_name(p_name text, p_player uuid) returns json
 language plpgsql security definer set search_path = public as $$
 declare v text := left(regexp_replace(trim(coalesce(p_name, '')), '[^[:print:]]', '', 'g'), 16);
 begin
   if v = '' then return json_build_object('ok', false, 'empty', true); end if;
   perform public.tt_name_ok(v, p_player);
-  return json_build_object('ok', true);
+  return public.tt_name_code(v, p_player, false);
 exception when others then
   if sqlerrm = 'name taken' then return json_build_object('ok', false, 'taken', true); end if;
   raise;
@@ -277,5 +329,5 @@ revoke all on function public.tt_submit_lap(text, uuid, text, int, text, int, te
 grant execute on function public.tt_submit_lap(text, uuid, text, int, text, int, text, text) to anon, authenticated;
 create or replace function public.tt_caps() returns json
 language sql stable security definer set search_path = public as $$
-  select json_build_object('daily', true, 'lap', true, 'names', true, 'version', 5);
+  select json_build_object('daily', true, 'lap', true, 'names', true, 'codes', true, 'version', 6);
 $$;
