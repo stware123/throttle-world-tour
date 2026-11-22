@@ -331,3 +331,41 @@ create or replace function public.tt_caps() returns json
 language sql stable security definer set search_path = public as $$
   select json_build_object('daily', true, 'lap', true, 'names', true, 'codes', true, 'version', 6);
 $$;
+
+-- 11) Daily challenge board with streaks: today's riders by race time or by best lap, each with how many
+--     days in a row they have ridden the daily challenge (today included)
+create index if not exists tt_times_name_cond on public.tt_times (name_key, cond);
+create or replace function public.tt_daily_board(p_track text, p_key text, p_sort text default 'total', p_limit int default 10)
+returns table (name text, total_ms int, best_lap_ms int, bike text, streak int)
+language plpgsql stable security definer set search_path = public as $$
+declare r record; d date; n int;
+begin
+  if p_key !~ '^daily-[0-9]{8}$' then return; end if;
+  for r in
+    select t.name, t.name_key, t.total_ms, t.best_lap_ms, coalesce(t.bike, t.lap_bike) as bike from tt_times t
+    where t.track = p_track and t.cond = p_key
+    order by case when p_sort = 'lap' then t.best_lap_ms else t.total_ms end, t.updated_at
+    limit least(greatest(coalesce(p_limit, 10), 1), 50)
+  loop
+    n := 1; d := to_date(substr(p_key, 7), 'YYYYMMDD') - 1;
+    while n < 366 and exists (select 1 from tt_times x where x.name_key = r.name_key and x.cond = 'daily-' || to_char(d, 'YYYYMMDD')) loop
+      n := n + 1; d := d - 1;
+    end loop;
+    name := r.name; total_ms := r.total_ms; best_lap_ms := r.best_lap_ms; bike := r.bike; streak := n;
+    return next;
+  end loop;
+end $$;
+grant execute on function public.tt_daily_board(text, text, text, int) to anon, authenticated;
+
+-- a rider's own daily streak (also counts a run in progress: yesterday's streak carries until they ride today)
+create or replace function public.tt_daily_streak(p_name text, p_key text) returns int
+language plpgsql stable security definer set search_path = public as $$
+declare k text := lower(trim(p_name)); d date := to_date(substr(p_key, 7), 'YYYYMMDD'); n int := 0;
+begin
+  if not exists (select 1 from tt_times where name_key = k and cond = p_key) then d := d - 1; end if;
+  while n < 366 and exists (select 1 from tt_times where name_key = k and cond = 'daily-' || to_char(d, 'YYYYMMDD')) loop
+    n := n + 1; d := d - 1;
+  end loop;
+  return n;
+end $$;
+grant execute on function public.tt_daily_streak(text, text) to anon, authenticated;
